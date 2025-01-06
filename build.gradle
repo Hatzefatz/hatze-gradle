@@ -132,14 +132,15 @@ tasks.register('createHotSwapAgentProperties') {
     }
 }
 
-//SSH upload
+// SSH-Upload-Konfiguration
+def sshHost = project.findProperty("sshHost") ?: ""
+def sshPort = project.findProperty("sshPort") ?: "22"
+def sshUser = project.findProperty("sshUser") ?: ""
+def sshKey = project.findProperty("sshKey") ?: ""
+def sshKeyPass = project.findProperty("sshKeyPass") ?: ""
+def enableSsh = project.findProperty("enableSsh") == "true"
 
-def sshHost = project.ext.get("sshHost") as String
-def sshPort = project.ext.get("sshPort") as String
-def sshUser = project.ext.get("sshUser") as String
-def sshKey = project.ext.get("sshKey") as String
-def sshKeyPass = project.ext.get("sshKeyPass") as String
-if (sshKey != null) {
+if (enableSsh && sshKey) {
     apply plugin: 'org.hidetake.ssh'
 
     ssh {
@@ -175,6 +176,13 @@ if (sshKey != null) {
                     println e
                 }
             }
+        }
+    }
+} else {
+    tasks.register("uploadJar") {
+        group = "hatze"
+        doLast {
+            println "SSH-Upload ist deaktiviert. Setze 'enableSsh=true' in gradle.properties, um es zu aktivieren."
         }
     }
 }
