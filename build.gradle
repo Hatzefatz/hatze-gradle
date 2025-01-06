@@ -1,0 +1,190 @@
+apply plugin: 'java'
+apply plugin: 'maven-publish'
+
+// Definiere Plugin-Verzeichnisse basierend auf einer Umgebungsvariablen
+def mcServerDirs = project.findProperty("mcServers") ?: ""
+println "MC_SERVERS: ${mcServerDirs}"
+if (mcServerDirs.isEmpty()) {
+    throw new GradleException("Die Umgebungsvariable 'MC_SERVERS' ist nicht gesetzt. Bitte definiere sie mit einem oder mehreren Serverpfaden.")
+}
+
+def mcPluginDirs = mcServerDirs.split(",").collect { it.trim() + "\\plugins" }
+println "Erkannte Plugin-Verzeichnisse: ${mcPluginDirs}"
+project.ext.set("pluginDirs", mcPluginDirs.join(","))
+
+repositories {
+    mavenCentral()
+    repositories {
+        maven {
+            url = uri("https://plugins.gradle.org/m2/")
+        }
+    }
+    maven {
+        url = "https://repo.papermc.io/repository/maven-public/"
+    }
+    maven {
+        url = "https://hub.spigotmc.org/nexus/content/repositories/snapshots/"
+    }
+    maven {
+        url = 'https://repo.extendedclip.com/content/repositories/placeholderapi/'
+    }
+    maven {
+        url = "https://maven.pkg.github.com/Hatzefatz/hatze-gradle"
+        credentials {
+            username = project.ext.get("githubUser")
+            password = project.ext.get("githubToken")
+        }
+    }
+    maven { url "https://repo.william278.net/releases" }
+    maven { url = "https://jitpack.io" }
+    maven {
+        url = "https://maven.pkg.github.com/Hatzefatz/hatze-plugins"
+        credentials {
+            username = project.ext.get("githubUser")
+            password = project.ext.get("githubToken")
+        }
+        content {
+            includeGroup "de.hatzefatz"
+        }
+    }
+}
+
+dependencies {
+    // Standard-Abhängigkeiten
+    compileOnly 'com.github.Exlll:ConfigLib:4.5.0'
+    compileOnly 'dev.jorel:commandapi-bukkit-core:9.5.1'
+    compileOnly 'dev.jorel:commandapi-bukkit-kotlin:9.5.1'
+    compileOnly 'me.clip:placeholderapi:2.11.5'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0'
+}
+publishing {
+    repositories {
+        maven {
+            // URL zu deinem GitHub Maven-Repository
+            url = uri("https://maven.pkg.github.com/Hatzefatz/hatze-plugins")
+            credentials {
+                // GitHub-Zugangsdaten aus gradle.properties oder Umgebungsvariablen
+                username = project.ext.get("githubUser")
+                password = project.ext.get("githubToken")
+            }
+        }
+    }
+    publications {
+        gpr(MavenPublication) {
+            from components.java
+            groupId = project.group.toString() // Z. B. "de.hatze"
+            artifactId = project.name.toLowerCase() // Name des Plugins
+            version = project.version // Plugin-Version, z. B. "1.0.0"
+        }
+    }
+}
+
+//Copie files into Minecraftfolder
+tasks.register('copyJar', Copy) {
+    group = "hatze"
+    dependsOn jar
+    from "${project.buildDir}\\libs"
+    include '**/*.jar'
+    exclude '**/*-dev.jar'
+    mcPluginDirs.each { dir ->
+        {
+            println "move from ${project.buildDir}\\libs to $dir"
+            into dir.trim()
+        }
+    }
+}
+
+//upload maven
+tasks.register("uploadMaven") {
+    group = "hatze"
+    dependsOn publish
+}
+//setup - downloads dependencys from the web
+tasks.register("setup") {
+    group = "hatze"
+    def urls = ["https://github.com/Exlll/ConfigLib/releases/download/v4.5.0/configlib-paper-4.5.0-all.jar"]
+    doLast {
+        urls.each { url ->
+            def fileName = url.split("/").last()
+            mcPluginDirs.each { dir ->
+                def destFile = new File(dir, fileName)
+                def download = new URL(url).openStream()
+                def fileStream = new FileOutputStream(destFile)
+                fileStream << download
+                fileStream.close()
+            }
+        }
+    }
+}
+
+//Hot swapt agency
+tasks.jar.dependsOn 'createHotSwapAgentProperties'
+
+tasks.register('createHotSwapAgentProperties') {
+    doLast {
+        def classesDir = project.file("${project.buildDir}/classes").absolutePath
+        def propertiesFile = file("$buildDir/resources/main/hotswap-agent.properties")
+        propertiesFile.parentFile.mkdirs()
+        propertiesFile.text = "extraClasspath=$classesDir".replaceAll("\\\\", "////")
+        propertiesFile.append("\ndisabledPlugins=Log4j2Plugin")
+        propertiesFile.append("\nautoHotswap=true")
+        propertiesFile.append("\nLOGGER=info")
+    }
+}
+
+//SSH upload
+
+def sshHost = project.ext.get("sshHost") as String
+def sshPort = project.ext.get("sshPort") as String
+def sshUser = project.ext.get("sshUser") as String
+def sshKey = project.ext.get("sshKey") as String
+def sshKeyPass = project.ext.get("sshKeyPass") as String
+if (sshKey != null) {
+    apply plugin: 'org.hidetake.ssh'
+
+    ssh {
+        remotes {
+            ailandia {
+                host = sshHost
+                port = sshPort.toInteger()
+                user = sshUser
+                identity = file(sshKey)
+                passphrase = sshKeyPass
+                setProperty("knownHosts", AllowAnyHosts.instance)
+            }
+        }
+    }
+
+    tasks.register("uploadJar") {
+        group = "hatze"
+        dependsOn jar
+
+        doLast {
+            def paths = [
+                    "/server/minecraft/test/plugins/update",
+                    "/server/minecraft/spawn/plugins",
+                    "/server/minecraft/story/plugins/update",
+                    "/server/minecraft/farm/plugins/update",
+                    "/server/minecraft/city/plugins/update"
+            ]
+            paths.each { path ->
+                try {
+                    uploadJarToPath(path)
+                } catch (Exception e) {
+                    println "Error uploading to $path"
+                    println e
+                }
+            }
+        }
+    }
+}
+
+def uploadJarToPath(String path) {
+    ssh.run {
+        session(ssh.remotes.ailandia) {
+            def file = project.tasks.jar.archiveFile.get().asFile
+            put from: file, into: path
+            println "Uploaded ${file} to ${path}"
+        }
+    }
+}
